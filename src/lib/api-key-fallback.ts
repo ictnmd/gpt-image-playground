@@ -124,18 +124,37 @@ export async function openStreamWithApiKeyFallback<T>(
     const primed = await withApiKeyFallback<PrimedStream<T>>(apiKeys, async (apiKey, index) => {
         const stream = await openStream(apiKey, index);
         const iterator = stream[Symbol.asyncIterator]();
-        const first = await iterator.next();
-        return { first, iterator };
+        try {
+            const first = await iterator.next();
+            return { first, iterator };
+        } catch (error) {
+            try {
+                await iterator.return?.();
+            } catch {}
+            throw error;
+        }
     });
 
     return {
         async *[Symbol.asyncIterator]() {
-            if (!primed.first.done) yield primed.first.value;
+            let completedNaturally = primed.first.done;
+            try {
+                if (!primed.first.done) yield primed.first.value;
 
-            let next = await primed.iterator.next();
-            while (!next.done) {
-                yield next.value;
-                next = await primed.iterator.next();
+                if (!completedNaturally) {
+                    let next = await primed.iterator.next();
+                    while (!next.done) {
+                        yield next.value;
+                        next = await primed.iterator.next();
+                    }
+                    completedNaturally = true;
+                }
+            } finally {
+                if (!completedNaturally) {
+                    try {
+                        await primed.iterator.return?.();
+                    } catch {}
+                }
             }
         }
     };

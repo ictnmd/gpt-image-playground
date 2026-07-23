@@ -125,14 +125,84 @@ describe('withApiKeyFallback', () => {
 });
 
 describe('openStreamWithApiKeyFallback', () => {
-    it('falls back when a stream fails before its first event', async () => {
+    it('closes a failed priming iterator before trying the next key', async () => {
+        const order: string[] = [];
+        const cleanup = vi.fn(async () => {
+            order.push('cleanup:first');
+            return { done: true as const, value: undefined };
+        });
+        const stream = await openStreamWithApiKeyFallback(['first', 'second'], async (apiKey) => {
+            order.push(`open:${apiKey}`);
+            if (apiKey === 'first') {
+                return {
+                    [Symbol.asyncIterator]() {
+                        return {
+                            async next() {
+                                throw statusError(503);
+                            },
+                            return: cleanup
+                        };
+                    }
+                };
+            }
+            return {
+                async *[Symbol.asyncIterator]() {
+                    yield 'completed';
+                }
+            };
+        });
+
+        const events: string[] = [];
+        for await (const event of stream) events.push(event);
+
+        expect(order).toEqual(['open:first', 'cleanup:first', 'open:second']);
+        expect(cleanup).toHaveBeenCalledTimes(1);
+        expect(events).toEqual(['completed']);
+    });
+
+    it('closes the selected iterator once when the consumer breaks', async () => {
+        const cleanup = vi.fn(async () => {
+            throw new Error('cleanup failed');
+        });
+        const stream = await openStreamWithApiKeyFallback(['first'], async () => ({
+            [Symbol.asyncIterator]() {
+                return {
+                    async next() {
+                        return { done: false as const, value: 'partial' };
+                    },
+                    return: cleanup
+                };
+            }
+        }));
+
+        await expect(
+            (async () => {
+                for await (const event of stream) {
+                    expect(event).toBe('partial');
+                    break;
+                }
+            })()
+        ).resolves.toBeUndefined();
+
+        expect(cleanup).toHaveBeenCalledTimes(1);
+    });
+
+    it('preserves a retryable priming failure when cleanup throws', async () => {
         const attempts: string[] = [];
+        const cleanup = vi.fn(async () => {
+            throw statusError(400);
+        });
         const stream = await openStreamWithApiKeyFallback(['first', 'second'], async (apiKey) => {
             attempts.push(apiKey);
             if (apiKey === 'first') {
                 return {
-                    async *[Symbol.asyncIterator]() {
-                        throw statusError(503);
+                    [Symbol.asyncIterator]() {
+                        return {
+                            async next() {
+                                throw statusError(503);
+                            },
+                            return: cleanup
+                        };
                     }
                 };
             }
@@ -147,17 +217,28 @@ describe('openStreamWithApiKeyFallback', () => {
         for await (const event of stream) events.push(event);
 
         expect(attempts).toEqual(['first', 'second']);
+        expect(cleanup).toHaveBeenCalledTimes(1);
         expect(events).toEqual(['completed']);
     });
 
-    it('does not reopen with another key after the first event', async () => {
+    it('does not reopen after the first event or replace an iteration failure when cleanup throws', async () => {
         const attempts: string[] = [];
+        const failure = statusError(503);
+        const cleanup = vi.fn(async () => {
+            throw statusError(400);
+        });
         const stream = await openStreamWithApiKeyFallback(['first', 'second'], async (apiKey) => {
             attempts.push(apiKey);
             return {
-                async *[Symbol.asyncIterator]() {
-                    yield 'partial';
-                    throw statusError(503);
+                [Symbol.asyncIterator]() {
+                    let eventIndex = 0;
+                    return {
+                        async next() {
+                            if (eventIndex++ === 0) return { done: false as const, value: 'partial' };
+                            throw failure;
+                        },
+                        return: cleanup
+                    };
                 }
             };
         });
@@ -165,10 +246,33 @@ describe('openStreamWithApiKeyFallback', () => {
         const events: string[] = [];
         await expect(async () => {
             for await (const event of stream) events.push(event);
-        }).rejects.toMatchObject({ status: 503 });
+        }).rejects.toBe(failure);
 
         expect(events).toEqual(['partial']);
         expect(attempts).toEqual(['first']);
+        expect(cleanup).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not close the selected iterator after natural completion', async () => {
+        const cleanup = vi.fn(async () => ({ done: true as const, value: undefined }));
+        const stream = await openStreamWithApiKeyFallback(['first'], async () => ({
+            [Symbol.asyncIterator]() {
+                let eventIndex = 0;
+                return {
+                    async next() {
+                        if (eventIndex++ === 0) return { done: false as const, value: 'completed' };
+                        return { done: true as const, value: undefined };
+                    },
+                    return: cleanup
+                };
+            }
+        }));
+
+        const events: string[] = [];
+        for await (const event of stream) events.push(event);
+
+        expect(events).toEqual(['completed']);
+        expect(cleanup).not.toHaveBeenCalled();
     });
 });
 
