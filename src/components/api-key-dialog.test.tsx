@@ -47,4 +47,70 @@ describe('ApiKeyDialog', () => {
         await user.click(screen.getByRole('button', { name: 'Show API keys' }));
         expect(textarea).not.toHaveClass('[-webkit-text-security:disc]');
     });
+
+    it('accepts 20 normalized API keys', async () => {
+        const user = userEvent.setup();
+        const keys = Array.from({ length: 20 }, (_, index) => `key-${index + 1}`);
+        const onSave = vi.fn();
+        render(<ApiKeyDialog isOpen onOpenChange={vi.fn()} initialKeys={keys} canDismiss={false} onSave={onSave} />);
+
+        await user.click(screen.getByRole('button', { name: 'Save API keys' }));
+
+        expect(onSave).toHaveBeenCalledWith(keys, true);
+    });
+
+    it('rejects 21 normalized API keys without closing the dialog', async () => {
+        const user = userEvent.setup();
+        const onOpenChange = vi.fn();
+        const onSave = vi.fn();
+        render(
+            <ApiKeyDialog
+                isOpen
+                onOpenChange={onOpenChange}
+                initialKeys={Array.from({ length: 21 }, (_, index) => `key-${index + 1}`)}
+                canDismiss={false}
+                onSave={onSave}
+            />
+        );
+
+        await user.click(screen.getByRole('button', { name: 'Save API keys' }));
+
+        expect(screen.getByText('API key configuration exceeds the supported limits.')).toBeInTheDocument();
+        expect(onSave).not.toHaveBeenCalled();
+        expect(onOpenChange).not.toHaveBeenCalledWith(false);
+    });
+
+    it('accepts a trimmed 512-character API key', async () => {
+        const user = userEvent.setup();
+        const key = 'k'.repeat(512);
+        const onSave = vi.fn();
+        render(
+            <ApiKeyDialog isOpen onOpenChange={vi.fn()} initialKeys={[` ${key} `]} canDismiss={false} onSave={onSave} />
+        );
+
+        await user.click(screen.getByRole('button', { name: 'Save API keys' }));
+
+        expect(onSave).toHaveBeenCalledWith([key], true);
+    });
+
+    it('rejects a trimmed 513-character API key without closing the dialog', async () => {
+        const user = userEvent.setup();
+        const onOpenChange = vi.fn();
+        const onSave = vi.fn();
+        render(
+            <ApiKeyDialog
+                isOpen
+                onOpenChange={onOpenChange}
+                initialKeys={[` ${'k'.repeat(513)} `]}
+                canDismiss={false}
+                onSave={onSave}
+            />
+        );
+
+        await user.click(screen.getByRole('button', { name: 'Save API keys' }));
+
+        expect(screen.getByText('API key configuration exceeds the supported limits.')).toBeInTheDocument();
+        expect(onSave).not.toHaveBeenCalled();
+        expect(onOpenChange).not.toHaveBeenCalledWith(false);
+    });
 });

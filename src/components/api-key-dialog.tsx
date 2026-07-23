@@ -13,7 +13,7 @@ import {
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { parseApiKeyText } from '@/lib/api-key-utils';
+import { MAX_API_KEYS, MAX_API_KEY_LENGTH, parseApiKeyText } from '@/lib/api-key-utils';
 import { Eye, EyeOff } from 'lucide-react';
 import * as React from 'react';
 
@@ -46,6 +46,10 @@ export function ApiKeyDialog({ isOpen, onOpenChange, initialKeys, canDismiss, on
         const keys = parseApiKeyText(keyText);
         if (keys.length === 0) {
             setValidationError('Enter at least one API key.');
+            return;
+        }
+        if (keys.length > MAX_API_KEYS || keys.some((key) => key.length > MAX_API_KEY_LENGTH)) {
+            setValidationError('API key configuration exceeds the supported limits.');
             return;
         }
 
