@@ -11,7 +11,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Slider } from '@/components/ui/slider';
 import { Textarea } from '@/components/ui/textarea';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import type { GptImageModel } from '@/lib/cost-utils';
 import { getPresetTooltip, validateGptImage2Size } from '@/lib/size-utils';
+import type { SizePreset } from '@/lib/size-utils';
 import {
     Upload,
     Eraser,
@@ -29,6 +31,7 @@ import {
     UploadCloud,
     Lock,
     LockOpen,
+    KeyRound,
     HelpCircle,
     SquareDashed,
     Info
@@ -41,9 +44,6 @@ type DrawnPoint = {
     y: number;
     size: number;
 };
-
-import type { GptImageModel } from '@/lib/cost-utils';
-import type { SizePreset } from '@/lib/size-utils';
 
 export type EditingFormData = {
     prompt: string;
@@ -65,6 +65,8 @@ type EditingFormProps = {
     isPasswordRequiredByBackend: boolean | null;
     clientPasswordHash: string | null;
     onOpenPasswordDialog: () => void;
+    hasApiKeys: boolean;
+    onOpenApiKeyDialog: () => void;
     editModel: EditingFormData['model'];
     setEditModel: React.Dispatch<React.SetStateAction<EditingFormData['model']>>;
     imageFiles: File[];
@@ -136,6 +138,8 @@ export function EditingForm({
     isPasswordRequiredByBackend,
     clientPasswordHash,
     onOpenPasswordDialog,
+    hasApiKeys,
+    onOpenApiKeyDialog,
     editModel,
     setEditModel,
     imageFiles,
@@ -178,9 +182,7 @@ export function EditingForm({
 
     const isGptImage2 = editModel === 'gpt-image-2';
     const customSizeValidation =
-        editSize === 'custom'
-            ? validateGptImage2Size(editCustomWidth, editCustomHeight)
-            : { valid: true as const };
+        editSize === 'custom' ? validateGptImage2Size(editCustomWidth, editCustomHeight) : { valid: true as const };
     const customSizeInvalid = editSize === 'custom' && !customSizeValidation.valid;
 
     // Disable streaming when editN > 1 (OpenAI limitation)
@@ -537,8 +539,18 @@ export function EditingForm({
                                 {clientPasswordHash ? <Lock className='h-4 w-4' /> : <LockOpen className='h-4 w-4' />}
                             </Button>
                         )}
+                        <Button
+                            variant='ghost'
+                            size='icon'
+                            onClick={onOpenApiKeyDialog}
+                            className='ml-2 text-white/60 hover:text-white'
+                            aria-label='Configure API keys'>
+                            <KeyRound className={hasApiKeys ? 'h-4 w-4 text-emerald-400' : 'h-4 w-4 text-amber-400'} />
+                        </Button>
                     </div>
-                    <CardDescription className='mt-1 text-white/60'>Modify an existing image with a text prompt.</CardDescription>
+                    <CardDescription className='mt-1 text-white/60'>
+                        Modify an existing image with a text prompt.
+                    </CardDescription>
                 </div>
                 <ModeToggle currentMode={currentMode} onModeChange={onModeChange} />
             </CardHeader>
@@ -549,7 +561,10 @@ export function EditingForm({
                             Model
                         </Label>
                         <div className='flex items-center gap-4'>
-                            <Select value={editModel} onValueChange={(value) => setEditModel(value as EditingFormData['model'])} disabled={isLoading}>
+                            <Select
+                                value={editModel}
+                                onValueChange={(value) => setEditModel(value as EditingFormData['model'])}
+                                disabled={isLoading}>
                                 <SelectTrigger
                                     id='edit-model-select'
                                     className='w-[180px] rounded-md border border-white/20 bg-black text-white focus:border-white/50 focus:ring-white/50'>
@@ -590,7 +605,7 @@ export function EditingForm({
                                             checked={enableStreaming}
                                             onCheckedChange={(checked) => setEnableStreaming(!!checked)}
                                             disabled={isLoading || editN[0] > 1}
-                                            className='border-white/40 data-[state=checked]:border-white data-[state=checked]:bg-white data-[state=checked]:text-black disabled:cursor-not-allowed disabled:opacity-50'
+                                            className='border-white/40 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:border-white data-[state=checked]:bg-white data-[state=checked]:text-black'
                                         />
                                         <Label
                                             htmlFor='edit-enable-streaming'
@@ -959,7 +974,7 @@ export function EditingForm({
                                 </div>
                                 <p className='text-xs text-white/50'>
                                     {(editCustomWidth * editCustomHeight).toLocaleString()} pixels (
-                                    {((editCustomWidth * editCustomHeight) / 8_294_400 * 100).toFixed(1)}% of max) ·{' '}
+                                    {(((editCustomWidth * editCustomHeight) / 8_294_400) * 100).toFixed(1)}% of max) ·{' '}
                                     {editCustomWidth > 0 && editCustomHeight > 0
                                         ? `${(Math.max(editCustomWidth, editCustomHeight) / Math.min(editCustomWidth, editCustomHeight)).toFixed(2)}:1 ratio`
                                         : '—'}

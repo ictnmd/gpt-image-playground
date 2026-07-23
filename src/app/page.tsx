@@ -1,14 +1,16 @@
 'use client';
 
+import { ApiKeyDialog } from '@/components/api-key-dialog';
 import { EditingForm, type EditingFormData } from '@/components/editing-form';
 import { GenerationForm, type GenerationFormData } from '@/components/generation-form';
 import { HistoryPanel } from '@/components/history-panel';
 import { ImageOutput } from '@/components/image-output';
 import { PasswordDialog } from '@/components/password-dialog';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { API_KEYS_STORAGE_KEY, parseStoredApiKeys } from '@/lib/api-key-utils';
 import { calculateApiCost, type CostDetails, type GptImageModel } from '@/lib/cost-utils';
-import { getPresetDimensions } from '@/lib/size-utils';
 import { db, type ImageRecord } from '@/lib/db';
+import { getPresetDimensions } from '@/lib/size-utils';
 import { useLiveQuery } from 'dexie-react-hooks';
 import * as React from 'react';
 
@@ -80,6 +82,9 @@ export default function HomePage() {
     const [isInitialLoad, setIsInitialLoad] = React.useState(true);
     const blobUrlCacheRef = React.useRef<Map<string, string>>(new Map());
     const [isPasswordDialogOpen, setIsPasswordDialogOpen] = React.useState(false);
+    const [apiKeys, setApiKeys] = React.useState<string[]>([]);
+    const [isApiKeyDialogOpen, setIsApiKeyDialogOpen] = React.useState(false);
+    const [hasLoadedApiKeys, setHasLoadedApiKeys] = React.useState(false);
     const [passwordDialogContext, setPasswordDialogContext] = React.useState<'initial' | 'retry'>('initial');
     const [lastApiCallArgs, setLastApiCallArgs] = React.useState<[GenerationFormData | EditingFormData] | null>(null);
     const [skipDeleteConfirmation, setSkipDeleteConfirmation] = React.useState<boolean>(false);
@@ -148,6 +153,29 @@ export default function HomePage() {
         return () => {
             cache.forEach((url) => URL.revokeObjectURL(url));
             cache.clear();
+        };
+    }, []);
+
+    React.useEffect(() => {
+        let cancelled = false;
+
+        queueMicrotask(() => {
+            if (cancelled) return;
+
+            const storedValue = localStorage.getItem(API_KEYS_STORAGE_KEY);
+            const storedKeys = parseStoredApiKeys(storedValue);
+
+            if (storedValue && storedKeys.length === 0) {
+                localStorage.removeItem(API_KEYS_STORAGE_KEY);
+            }
+
+            setApiKeys(storedKeys);
+            setIsApiKeyDialogOpen(storedKeys.length === 0);
+            setHasLoadedApiKeys(true);
+        });
+
+        return () => {
+            cancelled = true;
         };
     }, []);
 
@@ -302,6 +330,16 @@ export default function HomePage() {
         return hashHex;
     }
 
+    const handleSaveApiKeys = (keys: string[], persist: boolean) => {
+        setApiKeys(keys);
+        if (persist) {
+            localStorage.setItem(API_KEYS_STORAGE_KEY, JSON.stringify(keys));
+        } else {
+            localStorage.removeItem(API_KEYS_STORAGE_KEY);
+        }
+        setError(null);
+    };
+
     const handleSavePassword = async (password: string) => {
         if (!password.trim()) {
             setError('Password cannot be empty.');
@@ -335,6 +373,12 @@ export default function HomePage() {
     };
 
     const handleApiCall = async (formData: GenerationFormData | EditingFormData) => {
+        if (apiKeys.length === 0) {
+            setError('Configure at least one API key before generating images.');
+            setIsApiKeyDialogOpen(true);
+            return;
+        }
+
         const startTime = Date.now();
         let durationMs = 0;
 
@@ -346,6 +390,7 @@ export default function HomePage() {
         setStreamingPreviewImages(new Map());
 
         const apiFormData = new FormData();
+        apiFormData.append('apiKeys', JSON.stringify(apiKeys));
         if (isPasswordRequiredByBackend && clientPasswordHash) {
             apiFormData.append('passwordHash', clientPasswordHash);
         } else if (isPasswordRequiredByBackend && !clientPasswordHash) {
@@ -492,45 +537,53 @@ export default function HomePage() {
                                             model: currentModel
                                         };
 
-                                        let newImageBatchPromises: Promise<{ path: string; filename: string } | null>[] =
-                                            [];
+                                        let newImageBatchPromises: Promise<{
+                                            path: string;
+                                            filename: string;
+                                        } | null>[] = [];
                                         if (effectiveStorageModeClient === 'indexeddb') {
-                                            newImageBatchPromises = event.images.map(async (img: ApiImageResponseItem) => {
-                                                if (img.b64_json) {
-                                                    try {
-                                                        const byteCharacters = atob(img.b64_json);
-                                                        const byteNumbers = new Array(byteCharacters.length);
-                                                        for (let i = 0; i < byteCharacters.length; i++) {
-                                                            byteNumbers[i] = byteCharacters.charCodeAt(i);
+                                            newImageBatchPromises = event.images.map(
+                                                async (img: ApiImageResponseItem) => {
+                                                    if (img.b64_json) {
+                                                        try {
+                                                            const byteCharacters = atob(img.b64_json);
+                                                            const byteNumbers = new Array(byteCharacters.length);
+                                                            for (let i = 0; i < byteCharacters.length; i++) {
+                                                                byteNumbers[i] = byteCharacters.charCodeAt(i);
+                                                            }
+                                                            const byteArray = new Uint8Array(byteNumbers);
+
+                                                            const actualMimeType = getMimeTypeFromFormat(
+                                                                img.output_format
+                                                            );
+                                                            const blob = new Blob([byteArray], {
+                                                                type: actualMimeType
+                                                            });
+
+                                                            await db.images.put({ filename: img.filename, blob });
+
+                                                            const blobUrl = URL.createObjectURL(blob);
+                                                            blobUrlCacheRef.current.set(img.filename, blobUrl);
+
+                                                            return { filename: img.filename, path: blobUrl };
+                                                        } catch (dbError) {
+                                                            console.error(
+                                                                `Error saving blob ${img.filename} to IndexedDB:`,
+                                                                dbError
+                                                            );
+                                                            setError(
+                                                                `Failed to save image ${img.filename} to local database.`
+                                                            );
+                                                            return null;
                                                         }
-                                                        const byteArray = new Uint8Array(byteNumbers);
-
-                                                        const actualMimeType = getMimeTypeFromFormat(img.output_format);
-                                                        const blob = new Blob([byteArray], { type: actualMimeType });
-
-                                                        await db.images.put({ filename: img.filename, blob });
-
-                                                        const blobUrl = URL.createObjectURL(blob);
-                                                        blobUrlCacheRef.current.set(img.filename, blobUrl);
-
-                                                        return { filename: img.filename, path: blobUrl };
-                                                    } catch (dbError) {
-                                                        console.error(
-                                                            `Error saving blob ${img.filename} to IndexedDB:`,
-                                                            dbError
-                                                        );
-                                                        setError(
-                                                            `Failed to save image ${img.filename} to local database.`
+                                                    } else {
+                                                        console.warn(
+                                                            `Image ${img.filename} missing b64_json in indexeddb mode.`
                                                         );
                                                         return null;
                                                     }
-                                                } else {
-                                                    console.warn(
-                                                        `Image ${img.filename} missing b64_json in indexeddb mode.`
-                                                    );
-                                                    return null;
                                                 }
-                                            });
+                                            );
                                         } else {
                                             newImageBatchPromises = event.images
                                                 .filter((img: ApiImageResponseItem) => !!img.path)
@@ -570,6 +623,15 @@ export default function HomePage() {
             const result = await response.json();
 
             if (!response.ok) {
+                if (result.code === 'API_KEYS_REQUIRED' || result.code === 'INVALID_API_KEYS') {
+                    setError(result.error || 'Configure valid API keys to continue.');
+                    setIsApiKeyDialogOpen(true);
+                    return;
+                }
+                if (result.code === 'API_KEYS_EXHAUSTED') {
+                    setError(result.error || 'All configured API keys failed.');
+                    return;
+                }
                 if (response.status === 401 && isPasswordRequiredByBackend) {
                     setError('Unauthorized: Invalid or missing password. Please try again.');
                     setPasswordDialogContext('retry');
@@ -897,6 +959,15 @@ export default function HomePage() {
 
     return (
         <main className='flex min-h-screen flex-col items-center bg-black p-4 text-white md:p-8 lg:p-12'>
+            {hasLoadedApiKeys && (
+                <ApiKeyDialog
+                    isOpen={isApiKeyDialogOpen}
+                    onOpenChange={setIsApiKeyDialogOpen}
+                    initialKeys={apiKeys}
+                    canDismiss={apiKeys.length > 0}
+                    onSave={handleSaveApiKeys}
+                />
+            )}
             <PasswordDialog
                 isOpen={isPasswordDialogOpen}
                 onOpenChange={setIsPasswordDialogOpen}
@@ -920,6 +991,8 @@ export default function HomePage() {
                                 isPasswordRequiredByBackend={isPasswordRequiredByBackend}
                                 clientPasswordHash={clientPasswordHash}
                                 onOpenPasswordDialog={handleOpenPasswordDialog}
+                                hasApiKeys={apiKeys.length > 0}
+                                onOpenApiKeyDialog={() => setIsApiKeyDialogOpen(true)}
                                 model={genModel}
                                 setModel={setGenModel}
                                 prompt={genPrompt}
@@ -957,6 +1030,8 @@ export default function HomePage() {
                                 isPasswordRequiredByBackend={isPasswordRequiredByBackend}
                                 clientPasswordHash={clientPasswordHash}
                                 onOpenPasswordDialog={handleOpenPasswordDialog}
+                                hasApiKeys={apiKeys.length > 0}
+                                onOpenApiKeyDialog={() => setIsApiKeyDialogOpen(true)}
                                 editModel={editModel}
                                 setEditModel={setEditModel}
                                 imageFiles={editImageFiles}
