@@ -1,6 +1,7 @@
 import {
     ApiKeyPayloadError,
     ApiKeysExhaustedError,
+    getSafeApiError,
     isRetryableApiKeyError,
     parseApiKeyPayload,
     redactApiKeys,
@@ -119,6 +120,35 @@ describe('withApiKeyFallback', () => {
         expect(thrown).not.toHaveProperty('request');
         expect(thrown).not.toHaveProperty('cause');
         expect(attempt).toHaveBeenCalledTimes(2);
+    });
+});
+
+describe('getSafeApiError', () => {
+    it('returns API key payload error codes', () => {
+        expect(getSafeApiError(new ApiKeyPayloadError('Configure a key.', 401, 'API_KEYS_REQUIRED'), [])).toEqual({
+            status: 401,
+            body: { error: 'Configure a key.', code: 'API_KEYS_REQUIRED' }
+        });
+    });
+
+    it('returns a sanitized exhaustion response', () => {
+        const error = new ApiKeysExhaustedError(401);
+
+        expect(getSafeApiError(error, ['secret-key'])).toEqual({
+            status: 401,
+            body: {
+                error: 'All configured API keys failed. Check the keys or try again later.',
+                code: 'API_KEYS_EXHAUSTED'
+            }
+        });
+    });
+
+    it('redacts keys from non-exhaustion messages', () => {
+        const error = Object.assign(new Error('Request rejected for secret-key'), { status: 400 });
+        expect(getSafeApiError(error, ['secret-key'])).toEqual({
+            status: 400,
+            body: { error: 'Request rejected for [REDACTED]' }
+        });
     });
 });
 

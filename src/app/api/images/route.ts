@@ -1,3 +1,4 @@
+import { getSafeApiError, parseApiKeyPayload, redactApiKeys, withApiKeyFallback } from '@/lib/api-key-fallback';
 import crypto from 'crypto';
 import fs from 'fs/promises';
 import { NextRequest, NextResponse } from 'next/server';
@@ -23,12 +24,14 @@ type StreamingEvent = {
     error?: string;
 };
 
-const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-    baseURL: process.env.OPENAI_API_BASE_URL
-});
-
 const outputDir = path.resolve(process.cwd(), 'generated-images');
+
+function createOpenAIClient(apiKey: string): OpenAI {
+    return new OpenAI({
+        apiKey,
+        baseURL: process.env.OPENAI_API_BASE_URL
+    });
+}
 
 // Define valid output formats for type safety
 const VALID_OUTPUT_FORMATS = ['png', 'jpeg', 'webp'] as const;
@@ -76,10 +79,8 @@ function sha256(data: string): string {
 export async function POST(request: NextRequest) {
     console.log('Received POST request to /api/images');
 
-    if (!process.env.OPENAI_API_KEY) {
-        console.error('OPENAI_API_KEY is not set.');
-        return NextResponse.json({ error: 'Server configuration error: API key not found.' }, { status: 500 });
-    }
+    let apiKeys: string[] = [];
+
     try {
         let effectiveStorageMode: 'fs' | 'indexeddb';
         const explicitMode = process.env.NEXT_PUBLIC_IMAGE_STORAGE_MODE;
@@ -103,6 +104,7 @@ export async function POST(request: NextRequest) {
         }
 
         const formData = await request.formData();
+        apiKeys = parseApiKeyPayload(formData.get('apiKeys'));
 
         if (process.env.APP_PASSWORD) {
             const clientPasswordHash = formData.get('passwordHash') as string | null;
@@ -120,12 +122,8 @@ export async function POST(request: NextRequest) {
         const mode = formData.get('mode') as 'generate' | 'edit' | null;
         const prompt = formData.get('prompt') as string | null;
         const model =
-            (formData.get('model') as
-                | 'gpt-image-1'
-                | 'gpt-image-1-mini'
-                | 'gpt-image-1.5'
-                | 'gpt-image-2'
-                | null) || 'gpt-image-2';
+            (formData.get('model') as 'gpt-image-1' | 'gpt-image-1-mini' | 'gpt-image-1.5' | 'gpt-image-2' | null) ||
+            'gpt-image-2';
 
         console.log(`Mode: ${mode}, Model: ${model}, Prompt: ${prompt ? prompt.substring(0, 50) + '...' : 'N/A'}`);
 
@@ -180,7 +178,7 @@ export async function POST(request: NextRequest) {
                     partial_images: actualPartialImages
                 };
 
-                const stream = await openai.images.generate(streamParams);
+                const stream = await createOpenAIClient(apiKeys[0]).images.generate(streamParams);
 
                 // Create SSE response
                 const encoder = new TextEncoder();
@@ -256,10 +254,14 @@ export async function POST(request: NextRequest) {
                             controller.enqueue(encoder.encode(`data: ${JSON.stringify(doneEvent)}\n\n`));
                             controller.close();
                         } catch (error) {
-                            console.error('Streaming error:', error);
+                            const safeMessage = redactApiKeys(
+                                error instanceof Error ? error.message : 'Streaming error occurred',
+                                apiKeys
+                            );
+                            console.error('Streaming error:', safeMessage);
                             const errorEvent: StreamingEvent = {
                                 type: 'error',
-                                error: error instanceof Error ? error.message : 'Streaming error occurred'
+                                error: safeMessage
                             };
                             controller.enqueue(encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`));
                             controller.close();
@@ -271,14 +273,16 @@ export async function POST(request: NextRequest) {
                     headers: {
                         'Content-Type': 'text/event-stream',
                         'Cache-Control': 'no-cache',
-                        'Connection': 'keep-alive'
+                        Connection: 'keep-alive'
                     }
                 });
             }
 
             const params: OpenAI.Images.ImageGenerateParams = baseParams;
             console.log('Calling OpenAI generate with params:', params);
-            result = await openai.images.generate(params);
+            result = await withApiKeyFallback(apiKeys, async (apiKey) => {
+                return createOpenAIClient(apiKey).images.generate(params);
+            });
         } else if (mode === 'edit') {
             const n = parseInt((formData.get('n') as string) || '1', 10);
             // gpt-image-2 accepts arbitrary WxH strings that the SDK's narrow literal union doesn't express.
@@ -324,7 +328,7 @@ export async function POST(request: NextRequest) {
                     ...(maskFile ? { mask: maskFile } : {})
                 };
 
-                const stream = await openai.images.edit(streamEditParams);
+                const stream = await createOpenAIClient(apiKeys[0]).images.edit(streamEditParams);
 
                 // Create SSE response for edit
                 const encoder = new TextEncoder();
@@ -400,10 +404,14 @@ export async function POST(request: NextRequest) {
                             controller.enqueue(encoder.encode(`data: ${JSON.stringify(doneEvent)}\n\n`));
                             controller.close();
                         } catch (error) {
-                            console.error('Streaming edit error:', error);
+                            const safeMessage = redactApiKeys(
+                                error instanceof Error ? error.message : 'Streaming error occurred',
+                                apiKeys
+                            );
+                            console.error('Streaming edit error:', safeMessage);
                             const errorEvent: StreamingEvent = {
                                 type: 'error',
-                                error: error instanceof Error ? error.message : 'Streaming error occurred'
+                                error: safeMessage
                             };
                             controller.enqueue(encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`));
                             controller.close();
@@ -415,7 +423,7 @@ export async function POST(request: NextRequest) {
                     headers: {
                         'Content-Type': 'text/event-stream',
                         'Cache-Control': 'no-cache',
-                        'Connection': 'keep-alive'
+                        Connection: 'keep-alive'
                     }
                 });
             }
@@ -430,7 +438,9 @@ export async function POST(request: NextRequest) {
                 image: `[${imageFiles.map((f) => f.name).join(', ')}]`,
                 mask: maskFile ? maskFile.name : 'N/A'
             });
-            result = await openai.images.edit(params);
+            result = await withApiKeyFallback(apiKeys, async (apiKey) => {
+                return createOpenAIClient(apiKey).images.edit(params);
+            });
         } else {
             return NextResponse.json({ error: 'Invalid mode specified' }, { status: 400 });
         }
@@ -480,25 +490,8 @@ export async function POST(request: NextRequest) {
 
         return NextResponse.json({ images: savedImagesData, usage: result.usage });
     } catch (error: unknown) {
-        console.error('Error in /api/images:', error);
-
-        let errorMessage = 'An unexpected error occurred.';
-        let status = 500;
-
-        if (error instanceof Error) {
-            errorMessage = error.message;
-            if (typeof error === 'object' && error !== null && 'status' in error && typeof error.status === 'number') {
-                status = error.status;
-            }
-        } else if (typeof error === 'object' && error !== null) {
-            if ('message' in error && typeof error.message === 'string') {
-                errorMessage = error.message;
-            }
-            if ('status' in error && typeof error.status === 'number') {
-                status = error.status;
-            }
-        }
-
-        return NextResponse.json({ error: errorMessage }, { status });
+        const safeError = getSafeApiError(error, apiKeys);
+        console.error('Error in /api/images:', safeError.body.error);
+        return NextResponse.json(safeError.body, { status: safeError.status });
     }
 }

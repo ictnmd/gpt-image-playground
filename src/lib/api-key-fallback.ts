@@ -2,6 +2,11 @@ import { MAX_API_KEYS, MAX_API_KEY_LENGTH, normalizeApiKeys } from './api-key-ut
 
 type ApiKeyErrorCode = 'API_KEYS_REQUIRED' | 'INVALID_API_KEYS';
 
+type SafeApiErrorBody = {
+    error: string;
+    code?: ApiKeyErrorCode | 'API_KEYS_EXHAUSTED';
+};
+
 export class ApiKeyPayloadError extends Error {
     constructor(
         message: string,
@@ -105,6 +110,35 @@ export async function withApiKeyFallback<T>(
     }
 
     throw new ApiKeysExhaustedError(finalStatus);
+}
+
+export function getSafeApiError(
+    error: unknown,
+    apiKeys: readonly string[]
+): { status: number; body: SafeApiErrorBody } {
+    if (error instanceof ApiKeyPayloadError) {
+        return {
+            status: error.status,
+            body: { error: error.message, code: error.code }
+        };
+    }
+
+    if (error instanceof ApiKeysExhaustedError) {
+        return {
+            status: error.status,
+            body: {
+                error: 'All configured API keys failed. Check the keys or try again later.',
+                code: 'API_KEYS_EXHAUSTED'
+            }
+        };
+    }
+
+    const status = getErrorStatus(error) ?? 500;
+    const message = error instanceof Error ? error.message : 'An unexpected error occurred.';
+    return {
+        status,
+        body: { error: redactApiKeys(message, apiKeys) }
+    };
 }
 
 export function redactApiKeys(message: string, apiKeys: readonly string[]): string {
