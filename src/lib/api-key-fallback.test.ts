@@ -1,5 +1,3 @@
-import { describe, expect, it, vi } from 'vitest';
-
 import {
     ApiKeyPayloadError,
     ApiKeysExhaustedError,
@@ -8,6 +6,7 @@ import {
     redactApiKeys,
     withApiKeyFallback
 } from './api-key-fallback';
+import { describe, expect, it, vi } from 'vitest';
 
 function statusError(status: number): Error & { status: number } {
     return Object.assign(new Error(`upstream ${status}`), { status });
@@ -42,11 +41,11 @@ describe('parseApiKeyPayload', () => {
 });
 
 describe('isRetryableApiKeyError', () => {
-    it.each([401, 403, 429, 500, 503])('retries HTTP %s', (status) => {
+    it.each([401, 403, 429, 500, 503, 599])('retries HTTP %s', (status) => {
         expect(isRetryableApiKeyError(statusError(status))).toBe(true);
     });
 
-    it.each([400, 404, 422])('does not retry HTTP %s', (status) => {
+    it.each([400, 404, 422, 600])('does not retry HTTP %s', (status) => {
         expect(isRetryableApiKeyError(statusError(status))).toBe(false);
     });
 
@@ -69,26 +68,56 @@ describe('withApiKeyFallback', () => {
         expect(attempt.mock.calls.map(([key]) => key)).toEqual(['first', 'second', 'third']);
     });
 
-    it('stops immediately for a non-retryable error', async () => {
-        const failure = statusError(400);
+    it('stops immediately and throws a sanitized copy for a non-retryable error', async () => {
+        const failure = Object.assign(new Error('invalid request for first'), {
+            status: 400,
+            request: { apiKey: 'first' }
+        });
         const attempt = vi.fn(async () => {
             throw failure;
         });
 
-        await expect(withApiKeyFallback(['first', 'second'], attempt)).rejects.toBe(failure);
+        let thrown: unknown;
+        try {
+            await withApiKeyFallback(['first', 'second'], attempt);
+        } catch (error) {
+            thrown = error;
+        }
+
+        expect(thrown).not.toBe(failure);
+        expect(thrown).toMatchObject({
+            message: 'invalid request for [REDACTED]',
+            status: 400
+        });
+        expect(thrown).not.toHaveProperty('request');
+        expect(thrown).not.toHaveProperty('cause');
         expect(attempt).toHaveBeenCalledTimes(1);
     });
 
-    it('throws a sanitized exhaustion error after the final retryable failure', async () => {
+    it('throws a sanitized exhaustion error without retaining the raw final failure', async () => {
+        const failure = Object.assign(new Error('rate limited for second'), {
+            status: 429,
+            request: { apiKey: 'second' }
+        });
         const attempt = vi.fn(async () => {
-            throw statusError(429);
+            throw failure;
         });
 
-        await expect(withApiKeyFallback(['first', 'second'], attempt)).rejects.toMatchObject({
+        let thrown: unknown;
+        try {
+            await withApiKeyFallback(['first', 'second'], attempt);
+        } catch (error) {
+            thrown = error;
+        }
+
+        expect(thrown).not.toBe(failure);
+        expect(thrown).toMatchObject({
             name: 'ApiKeysExhaustedError',
             message: 'All configured API keys failed.',
             status: 429
         } satisfies Partial<ApiKeysExhaustedError>);
+        expect(thrown).not.toHaveProperty('request');
+        expect(thrown).not.toHaveProperty('cause');
         expect(attempt).toHaveBeenCalledTimes(2);
     });
 });
@@ -96,6 +125,12 @@ describe('withApiKeyFallback', () => {
 describe('redactApiKeys', () => {
     it('removes complete keys from an upstream error message', () => {
         expect(redactApiKeys('Authorization failed for secret-key', ['secret-key'])).toBe(
+            'Authorization failed for [REDACTED]'
+        );
+    });
+
+    it('redacts overlapping keys longest-first', () => {
+        expect(redactApiKeys('Authorization failed for secret-value', ['secret', 'secret-value'])).toBe(
             'Authorization failed for [REDACTED]'
         );
     });

@@ -14,26 +14,35 @@ export class ApiKeyPayloadError extends Error {
 }
 
 export class ApiKeysExhaustedError extends Error {
-    constructor(
-        readonly status: number,
-        options: { cause: unknown }
-    ) {
-        super('All configured API keys failed.', options);
+    constructor(readonly status: number) {
+        super('All configured API keys failed.');
         this.name = 'ApiKeysExhaustedError';
     }
 }
 
-function getErrorStatus(error: unknown): number | undefined {
-    if (
-        typeof error === 'object' &&
-        error !== null &&
-        'status' in error &&
-        typeof error.status === 'number'
+class ApiKeyAttemptError extends Error {
+    constructor(
+        message: string,
+        readonly status?: number
     ) {
+        super(message);
+        this.name = 'ApiKeyAttemptError';
+    }
+}
+
+function getErrorStatus(error: unknown): number | undefined {
+    if (typeof error === 'object' && error !== null && 'status' in error && typeof error.status === 'number') {
         return error.status;
     }
 
     return undefined;
+}
+
+function sanitizeApiKeyError(error: unknown, apiKeys: readonly string[]): ApiKeyAttemptError {
+    const message =
+        error instanceof Error ? error.message : typeof error === 'string' ? error : 'The API key request failed.';
+
+    return new ApiKeyAttemptError(redactApiKeys(message, apiKeys), getErrorStatus(error));
 }
 
 export function parseApiKeyPayload(value: FormDataEntryValue | null): string[] {
@@ -73,7 +82,7 @@ export function parseApiKeyPayload(value: FormDataEntryValue | null): string[] {
 export function isRetryableApiKeyError(error: unknown): boolean {
     const status = getErrorStatus(error);
     if (status !== undefined) {
-        return status === 401 || status === 403 || status === 429 || status >= 500;
+        return status === 401 || status === 403 || status === 429 || (status >= 500 && status <= 599);
     }
 
     if (!(error instanceof Error)) return false;
@@ -84,20 +93,22 @@ export async function withApiKeyFallback<T>(
     apiKeys: readonly string[],
     attempt: (apiKey: string, index: number) => Promise<T>
 ): Promise<T> {
-    let finalError: unknown;
+    let finalStatus = 502;
 
     for (let index = 0; index < apiKeys.length; index++) {
         try {
             return await attempt(apiKeys[index], index);
         } catch (error) {
-            if (!isRetryableApiKeyError(error)) throw error;
-            finalError = error;
+            if (!isRetryableApiKeyError(error)) throw sanitizeApiKeyError(error, apiKeys);
+            finalStatus = getErrorStatus(error) ?? 502;
         }
     }
 
-    throw new ApiKeysExhaustedError(getErrorStatus(finalError) ?? 502, { cause: finalError });
+    throw new ApiKeysExhaustedError(finalStatus);
 }
 
 export function redactApiKeys(message: string, apiKeys: readonly string[]): string {
-    return apiKeys.reduce((safeMessage, apiKey) => safeMessage.replaceAll(apiKey, '[REDACTED]'), message);
+    return [...apiKeys]
+        .sort((first, second) => second.length - first.length)
+        .reduce((safeMessage, apiKey) => safeMessage.replaceAll(apiKey, '[REDACTED]'), message);
 }
