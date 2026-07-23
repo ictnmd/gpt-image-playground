@@ -1,8 +1,8 @@
 import {
     getSafeApiError,
+    getSafeUpstreamErrorMessage,
     openStreamWithApiKeyFallback,
     parseApiKeyPayload,
-    redactApiKeys,
     withApiKeyFallback
 } from '@/lib/api-key-fallback';
 import crypto from 'crypto';
@@ -262,10 +262,7 @@ export async function POST(request: NextRequest) {
                             controller.enqueue(encoder.encode(`data: ${JSON.stringify(doneEvent)}\n\n`));
                             controller.close();
                         } catch (error) {
-                            const safeMessage = redactApiKeys(
-                                error instanceof Error ? error.message : 'Streaming error occurred',
-                                apiKeys
-                            );
+                            const safeMessage = getSafeUpstreamErrorMessage(error);
                             console.error('Streaming error:', safeMessage);
                             const errorEvent: StreamingEvent = {
                                 type: 'error',
@@ -414,10 +411,7 @@ export async function POST(request: NextRequest) {
                             controller.enqueue(encoder.encode(`data: ${JSON.stringify(doneEvent)}\n\n`));
                             controller.close();
                         } catch (error) {
-                            const safeMessage = redactApiKeys(
-                                error instanceof Error ? error.message : 'Streaming error occurred',
-                                apiKeys
-                            );
+                            const safeMessage = getSafeUpstreamErrorMessage(error);
                             console.error('Streaming edit error:', safeMessage);
                             const errorEvent: StreamingEvent = {
                                 type: 'error',

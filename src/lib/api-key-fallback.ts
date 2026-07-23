@@ -1,4 +1,5 @@
 import { MAX_API_KEYS, MAX_API_KEY_LENGTH, normalizeApiKeys } from './api-key-utils';
+import { APIConnectionError } from 'openai';
 
 type ApiKeyErrorCode = 'API_KEYS_REQUIRED' | 'INVALID_API_KEYS';
 
@@ -48,11 +49,8 @@ function getErrorStatus(error: unknown): number | undefined {
     return undefined;
 }
 
-function sanitizeApiKeyError(error: unknown, apiKeys: readonly string[]): ApiKeyAttemptError {
-    const message =
-        error instanceof Error ? error.message : typeof error === 'string' ? error : 'The API key request failed.';
-
-    return new ApiKeyAttemptError(redactApiKeys(message, apiKeys), getErrorStatus(error));
+function sanitizeApiKeyError(error: unknown): ApiKeyAttemptError {
+    return new ApiKeyAttemptError(getSafeUpstreamErrorMessage(error), getErrorStatus(error));
 }
 
 export function parseApiKeyPayload(value: FormDataEntryValue | null): string[] {
@@ -95,8 +93,26 @@ export function isRetryableApiKeyError(error: unknown): boolean {
         return status === 401 || status === 403 || status === 429 || (status >= 500 && status <= 599);
     }
 
-    if (!(error instanceof Error)) return false;
-    return ['APIConnectionError', 'APIConnectionTimeoutError', 'FetchError'].includes(error.name);
+    return error instanceof APIConnectionError;
+}
+
+export function getSafeUpstreamErrorMessage(error: unknown): string {
+    const status = getErrorStatus(error);
+
+    if (status === 401 || status === 403) {
+        return 'The provider rejected the API key.';
+    }
+    if (status === 429) {
+        return 'The provider rate limit or quota was exceeded.';
+    }
+    if (error instanceof APIConnectionError) {
+        return 'Could not connect to the provider.';
+    }
+    if (status !== undefined && status >= 500 && status <= 599) {
+        return 'The provider is temporarily unavailable.';
+    }
+
+    return 'The provider request failed.';
 }
 
 export async function withApiKeyFallback<T>(
@@ -109,7 +125,7 @@ export async function withApiKeyFallback<T>(
         try {
             return await attempt(apiKeys[index], index);
         } catch (error) {
-            if (!isRetryableApiKeyError(error)) throw sanitizeApiKeyError(error, apiKeys);
+            if (!isRetryableApiKeyError(error)) throw sanitizeApiKeyError(error);
             finalStatus = getErrorStatus(error) ?? 502;
         }
     }

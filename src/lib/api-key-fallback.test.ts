@@ -2,12 +2,14 @@ import {
     ApiKeyPayloadError,
     ApiKeysExhaustedError,
     getSafeApiError,
+    getSafeUpstreamErrorMessage,
     isRetryableApiKeyError,
     openStreamWithApiKeyFallback,
     parseApiKeyPayload,
     redactApiKeys,
     withApiKeyFallback
 } from './api-key-fallback';
+import { APIConnectionError, APIConnectionTimeoutError } from 'openai';
 import { describe, expect, it, vi } from 'vitest';
 
 function statusError(status: number): Error & { status: number } {
@@ -51,11 +53,17 @@ describe('isRetryableApiKeyError', () => {
         expect(isRetryableApiKeyError(statusError(status))).toBe(false);
     });
 
-    it('retries recognized connection errors only', () => {
-        const connectionError = new Error('connection failed');
-        connectionError.name = 'APIConnectionError';
-        expect(isRetryableApiKeyError(connectionError)).toBe(true);
+    it('retries actual OpenAI SDK connection errors only', () => {
+        expect(isRetryableApiKeyError(new APIConnectionError({ message: 'connection failed' }))).toBe(true);
+        expect(isRetryableApiKeyError(new APIConnectionTimeoutError({ message: 'request timed out' }))).toBe(true);
         expect(isRetryableApiKeyError(new Error('programming failure'))).toBe(false);
+    });
+
+    it('does not trust an arbitrary error name', () => {
+        const lookalike = new Error('not an SDK connection error');
+        lookalike.name = 'APIConnectionError';
+
+        expect(isRetryableApiKeyError(lookalike)).toBe(false);
     });
 });
 
@@ -70,27 +78,47 @@ describe('withApiKeyFallback', () => {
         expect(attempt.mock.calls.map(([key]) => key)).toEqual(['first', 'second', 'third']);
     });
 
-    it('stops immediately and throws a sanitized copy for a non-retryable error', async () => {
-        const failure = Object.assign(new Error('invalid request for first'), {
-            status: 400,
-            request: { apiKey: 'first' }
+    it.each([
+        ['connection', new APIConnectionError({ message: 'connection failed' })],
+        ['timeout', new APIConnectionTimeoutError({ message: 'request timed out' })]
+    ])('advances to the next key after an actual SDK %s error', async (_kind, failure) => {
+        const attempt = vi.fn(async (key: string) => {
+            if (key === 'first') throw failure;
+            return 'ok';
         });
+
+        await expect(withApiKeyFallback(['first', 'second'], attempt)).resolves.toBe('ok');
+        expect(attempt.mock.calls.map(([key]) => key)).toEqual(['first', 'second']);
+    });
+
+    it('stops immediately and replaces a non-retryable upstream message with an allowlisted message', async () => {
+        const apiKey = 'sk-sensitive-prefix-middle-suffix-fragment';
+        const failure = Object.assign(
+            new Error(`invalid request for ${apiKey}; masked key sk-sensitive-prefix...suffix-fragment was rejected`),
+            {
+                status: 400,
+                request: { apiKey }
+            }
+        );
         const attempt = vi.fn(async () => {
             throw failure;
         });
 
         let thrown: unknown;
         try {
-            await withApiKeyFallback(['first', 'second'], attempt);
+            await withApiKeyFallback([apiKey, 'second'], attempt);
         } catch (error) {
             thrown = error;
         }
 
         expect(thrown).not.toBe(failure);
         expect(thrown).toMatchObject({
-            message: 'invalid request for [REDACTED]',
+            message: 'The provider request failed.',
             status: 400
         });
+        expect((thrown as Error).message).not.toContain(apiKey);
+        expect((thrown as Error).message).not.toContain('sk-sensitive-prefix');
+        expect((thrown as Error).message).not.toContain('suffix-fragment');
         expect(thrown).not.toHaveProperty('request');
         expect(thrown).not.toHaveProperty('cause');
         expect(attempt).toHaveBeenCalledTimes(1);
@@ -273,6 +301,35 @@ describe('openStreamWithApiKeyFallback', () => {
 
         expect(events).toEqual(['completed']);
         expect(cleanup).not.toHaveBeenCalled();
+    });
+});
+
+describe('getSafeUpstreamErrorMessage', () => {
+    it.each([
+        [statusError(401), 'The provider rejected the API key.'],
+        [statusError(403), 'The provider rejected the API key.'],
+        [statusError(429), 'The provider rate limit or quota was exceeded.'],
+        [new APIConnectionError({ message: 'raw connection detail' }), 'Could not connect to the provider.'],
+        [new APIConnectionTimeoutError({ message: 'raw timeout detail' }), 'Could not connect to the provider.'],
+        [statusError(503), 'The provider is temporarily unavailable.'],
+        [statusError(400), 'The provider request failed.'],
+        [new Error('unknown upstream failure'), 'The provider request failed.']
+    ])('maps upstream metadata to an allowlisted message', (error, expected) => {
+        expect(getSafeUpstreamErrorMessage(error)).toBe(expected);
+    });
+
+    it('does not expose full or partial credential strings from upstream messages', () => {
+        const apiKey = 'sk-sensitive-prefix-middle-suffix-fragment';
+        const error = Object.assign(new Error(`Rejected ${apiKey}; masked sk-sensitive-prefix...suffix-fragment`), {
+            status: 401
+        });
+
+        const message = getSafeUpstreamErrorMessage(error);
+
+        expect(message).toBe('The provider rejected the API key.');
+        expect(message).not.toContain(apiKey);
+        expect(message).not.toContain('sk-sensitive-prefix');
+        expect(message).not.toContain('suffix-fragment');
     });
 });
 
