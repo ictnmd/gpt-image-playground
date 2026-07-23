@@ -3,6 +3,7 @@ import {
     ApiKeysExhaustedError,
     getSafeApiError,
     isRetryableApiKeyError,
+    openStreamWithApiKeyFallback,
     parseApiKeyPayload,
     redactApiKeys,
     withApiKeyFallback
@@ -120,6 +121,54 @@ describe('withApiKeyFallback', () => {
         expect(thrown).not.toHaveProperty('request');
         expect(thrown).not.toHaveProperty('cause');
         expect(attempt).toHaveBeenCalledTimes(2);
+    });
+});
+
+describe('openStreamWithApiKeyFallback', () => {
+    it('falls back when a stream fails before its first event', async () => {
+        const attempts: string[] = [];
+        const stream = await openStreamWithApiKeyFallback(['first', 'second'], async (apiKey) => {
+            attempts.push(apiKey);
+            if (apiKey === 'first') {
+                return {
+                    async *[Symbol.asyncIterator]() {
+                        throw statusError(503);
+                    }
+                };
+            }
+            return {
+                async *[Symbol.asyncIterator]() {
+                    yield 'completed';
+                }
+            };
+        });
+
+        const events: string[] = [];
+        for await (const event of stream) events.push(event);
+
+        expect(attempts).toEqual(['first', 'second']);
+        expect(events).toEqual(['completed']);
+    });
+
+    it('does not reopen with another key after the first event', async () => {
+        const attempts: string[] = [];
+        const stream = await openStreamWithApiKeyFallback(['first', 'second'], async (apiKey) => {
+            attempts.push(apiKey);
+            return {
+                async *[Symbol.asyncIterator]() {
+                    yield 'partial';
+                    throw statusError(503);
+                }
+            };
+        });
+
+        const events: string[] = [];
+        await expect(async () => {
+            for await (const event of stream) events.push(event);
+        }).rejects.toMatchObject({ status: 503 });
+
+        expect(events).toEqual(['partial']);
+        expect(attempts).toEqual(['first']);
     });
 });
 

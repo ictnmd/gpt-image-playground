@@ -1,4 +1,10 @@
-import { getSafeApiError, parseApiKeyPayload, redactApiKeys, withApiKeyFallback } from '@/lib/api-key-fallback';
+import {
+    getSafeApiError,
+    openStreamWithApiKeyFallback,
+    parseApiKeyPayload,
+    redactApiKeys,
+    withApiKeyFallback
+} from '@/lib/api-key-fallback';
 import crypto from 'crypto';
 import fs from 'fs/promises';
 import { NextRequest, NextResponse } from 'next/server';
@@ -178,7 +184,9 @@ export async function POST(request: NextRequest) {
                     partial_images: actualPartialImages
                 };
 
-                const stream = await createOpenAIClient(apiKeys[0]).images.generate(streamParams);
+                const stream = await openStreamWithApiKeyFallback(apiKeys, async (apiKey) => {
+                    return createOpenAIClient(apiKey).images.generate(streamParams);
+                });
 
                 // Create SSE response
                 const encoder = new TextEncoder();
@@ -328,7 +336,9 @@ export async function POST(request: NextRequest) {
                     ...(maskFile ? { mask: maskFile } : {})
                 };
 
-                const stream = await createOpenAIClient(apiKeys[0]).images.edit(streamEditParams);
+                const stream = await openStreamWithApiKeyFallback(apiKeys, async (apiKey) => {
+                    return createOpenAIClient(apiKey).images.edit(streamEditParams);
+                });
 
                 // Create SSE response for edit
                 const encoder = new TextEncoder();

@@ -477,140 +477,146 @@ export default function HomePage() {
                     for (const line of lines) {
                         if (line.startsWith('data: ')) {
                             const jsonStr = line.slice(6);
+                            let event: {
+                                type: string;
+                                error?: string;
+                                index?: number;
+                                b64_json?: string;
+                                images?: ApiImageResponseItem[];
+                                usage?: Parameters<typeof calculateApiCost>[0];
+                            };
+
                             try {
-                                const event = JSON.parse(jsonStr);
-
-                                if (event.type === 'partial_image') {
-                                    // Update streaming preview with partial image
-                                    const imageIndex = event.index ?? 0;
-                                    const dataUrl = `data:image/png;base64,${event.b64_json}`;
-                                    setStreamingPreviewImages((prev) => {
-                                        const newMap = new Map(prev);
-                                        newMap.set(imageIndex, dataUrl);
-                                        return newMap;
-                                    });
-                                } else if (event.type === 'error') {
-                                    throw new Error(event.error || 'Streaming error occurred');
-                                } else if (event.type === 'done') {
-                                    // Finalize with all completed images
-                                    durationMs = Date.now() - startTime;
-
-                                    if (event.images && event.images.length > 0) {
-                                        let historyQuality: GenerationFormData['quality'] = 'auto';
-                                        let historyBackground: GenerationFormData['background'] = 'auto';
-                                        let historyModeration: GenerationFormData['moderation'] = 'auto';
-                                        let historyOutputFormat: GenerationFormData['output_format'] = 'png';
-                                        let historyPrompt: string = '';
-
-                                        if (mode === 'generate') {
-                                            historyQuality = genQuality;
-                                            historyBackground = genBackground;
-                                            historyModeration = genModeration;
-                                            historyOutputFormat = genOutputFormat;
-                                            historyPrompt = genPrompt;
-                                        } else {
-                                            historyQuality = editQuality;
-                                            historyBackground = 'auto';
-                                            historyModeration = 'auto';
-                                            historyOutputFormat = 'png';
-                                            historyPrompt = editPrompt;
-                                        }
-
-                                        const currentModel = mode === 'generate' ? genModel : editModel;
-                                        const costDetails = calculateApiCost(event.usage, currentModel);
-
-                                        const batchTimestamp = Date.now();
-                                        const newHistoryEntry: HistoryMetadata = {
-                                            timestamp: batchTimestamp,
-                                            images: event.images.map((img: { filename: string }) => ({
-                                                filename: img.filename
-                                            })),
-                                            storageModeUsed: effectiveStorageModeClient,
-                                            durationMs: durationMs,
-                                            quality: historyQuality,
-                                            background: historyBackground,
-                                            moderation: historyModeration,
-                                            output_format: historyOutputFormat,
-                                            prompt: historyPrompt,
-                                            mode: mode,
-                                            costDetails: costDetails,
-                                            model: currentModel
-                                        };
-
-                                        let newImageBatchPromises: Promise<{
-                                            path: string;
-                                            filename: string;
-                                        } | null>[] = [];
-                                        if (effectiveStorageModeClient === 'indexeddb') {
-                                            newImageBatchPromises = event.images.map(
-                                                async (img: ApiImageResponseItem) => {
-                                                    if (img.b64_json) {
-                                                        try {
-                                                            const byteCharacters = atob(img.b64_json);
-                                                            const byteNumbers = new Array(byteCharacters.length);
-                                                            for (let i = 0; i < byteCharacters.length; i++) {
-                                                                byteNumbers[i] = byteCharacters.charCodeAt(i);
-                                                            }
-                                                            const byteArray = new Uint8Array(byteNumbers);
-
-                                                            const actualMimeType = getMimeTypeFromFormat(
-                                                                img.output_format
-                                                            );
-                                                            const blob = new Blob([byteArray], {
-                                                                type: actualMimeType
-                                                            });
-
-                                                            await db.images.put({ filename: img.filename, blob });
-
-                                                            const blobUrl = URL.createObjectURL(blob);
-                                                            blobUrlCacheRef.current.set(img.filename, blobUrl);
-
-                                                            return { filename: img.filename, path: blobUrl };
-                                                        } catch (dbError) {
-                                                            console.error(
-                                                                `Error saving blob ${img.filename} to IndexedDB:`,
-                                                                dbError
-                                                            );
-                                                            setError(
-                                                                `Failed to save image ${img.filename} to local database.`
-                                                            );
-                                                            return null;
-                                                        }
-                                                    } else {
-                                                        console.warn(
-                                                            `Image ${img.filename} missing b64_json in indexeddb mode.`
-                                                        );
-                                                        return null;
-                                                    }
-                                                }
-                                            );
-                                        } else {
-                                            newImageBatchPromises = event.images
-                                                .filter((img: ApiImageResponseItem) => !!img.path)
-                                                .map((img: ApiImageResponseItem) =>
-                                                    Promise.resolve({
-                                                        path: img.path!,
-                                                        filename: img.filename
-                                                    })
-                                                );
-                                        }
-
-                                        const processedImages = (await Promise.all(newImageBatchPromises)).filter(
-                                            Boolean
-                                        ) as {
-                                            path: string;
-                                            filename: string;
-                                        }[];
-
-                                        setLatestImageBatch(processedImages);
-                                        setImageOutputView(processedImages.length > 1 ? 'grid' : 0);
-                                        setStreamingPreviewImages(new Map()); // Clear streaming previews
-
-                                        setHistory((prevHistory) => [newHistoryEntry, ...prevHistory]);
-                                    }
-                                }
+                                event = JSON.parse(jsonStr);
                             } catch (parseError) {
                                 console.error('Error parsing SSE event:', parseError);
+                                continue;
+                            }
+
+                            if (event.type === 'error') {
+                                throw new Error(event.error || 'Streaming error occurred');
+                            }
+
+                            if (event.type === 'partial_image') {
+                                // Update streaming preview with partial image
+                                const imageIndex = event.index ?? 0;
+                                const dataUrl = `data:image/png;base64,${event.b64_json}`;
+                                setStreamingPreviewImages((prev) => {
+                                    const newMap = new Map(prev);
+                                    newMap.set(imageIndex, dataUrl);
+                                    return newMap;
+                                });
+                            } else if (event.type === 'done') {
+                                // Finalize with all completed images
+                                durationMs = Date.now() - startTime;
+
+                                if (event.images && event.images.length > 0) {
+                                    let historyQuality: GenerationFormData['quality'] = 'auto';
+                                    let historyBackground: GenerationFormData['background'] = 'auto';
+                                    let historyModeration: GenerationFormData['moderation'] = 'auto';
+                                    let historyOutputFormat: GenerationFormData['output_format'] = 'png';
+                                    let historyPrompt: string = '';
+
+                                    if (mode === 'generate') {
+                                        historyQuality = genQuality;
+                                        historyBackground = genBackground;
+                                        historyModeration = genModeration;
+                                        historyOutputFormat = genOutputFormat;
+                                        historyPrompt = genPrompt;
+                                    } else {
+                                        historyQuality = editQuality;
+                                        historyBackground = 'auto';
+                                        historyModeration = 'auto';
+                                        historyOutputFormat = 'png';
+                                        historyPrompt = editPrompt;
+                                    }
+
+                                    const currentModel = mode === 'generate' ? genModel : editModel;
+                                    const costDetails = calculateApiCost(event.usage, currentModel);
+
+                                    const batchTimestamp = Date.now();
+                                    const newHistoryEntry: HistoryMetadata = {
+                                        timestamp: batchTimestamp,
+                                        images: event.images.map((img: { filename: string }) => ({
+                                            filename: img.filename
+                                        })),
+                                        storageModeUsed: effectiveStorageModeClient,
+                                        durationMs: durationMs,
+                                        quality: historyQuality,
+                                        background: historyBackground,
+                                        moderation: historyModeration,
+                                        output_format: historyOutputFormat,
+                                        prompt: historyPrompt,
+                                        mode: mode,
+                                        costDetails: costDetails,
+                                        model: currentModel
+                                    };
+
+                                    let newImageBatchPromises: Promise<{
+                                        path: string;
+                                        filename: string;
+                                    } | null>[] = [];
+                                    if (effectiveStorageModeClient === 'indexeddb') {
+                                        newImageBatchPromises = event.images.map(async (img: ApiImageResponseItem) => {
+                                            if (img.b64_json) {
+                                                try {
+                                                    const byteCharacters = atob(img.b64_json);
+                                                    const byteNumbers = new Array(byteCharacters.length);
+                                                    for (let i = 0; i < byteCharacters.length; i++) {
+                                                        byteNumbers[i] = byteCharacters.charCodeAt(i);
+                                                    }
+                                                    const byteArray = new Uint8Array(byteNumbers);
+
+                                                    const actualMimeType = getMimeTypeFromFormat(img.output_format);
+                                                    const blob = new Blob([byteArray], {
+                                                        type: actualMimeType
+                                                    });
+
+                                                    await db.images.put({ filename: img.filename, blob });
+
+                                                    const blobUrl = URL.createObjectURL(blob);
+                                                    blobUrlCacheRef.current.set(img.filename, blobUrl);
+
+                                                    return { filename: img.filename, path: blobUrl };
+                                                } catch (dbError) {
+                                                    console.error(
+                                                        `Error saving blob ${img.filename} to IndexedDB:`,
+                                                        dbError
+                                                    );
+                                                    setError(`Failed to save image ${img.filename} to local database.`);
+                                                    return null;
+                                                }
+                                            } else {
+                                                console.warn(
+                                                    `Image ${img.filename} missing b64_json in indexeddb mode.`
+                                                );
+                                                return null;
+                                            }
+                                        });
+                                    } else {
+                                        newImageBatchPromises = event.images
+                                            .filter((img: ApiImageResponseItem) => !!img.path)
+                                            .map((img: ApiImageResponseItem) =>
+                                                Promise.resolve({
+                                                    path: img.path!,
+                                                    filename: img.filename
+                                                })
+                                            );
+                                    }
+
+                                    const processedImages = (await Promise.all(newImageBatchPromises)).filter(
+                                        Boolean
+                                    ) as {
+                                        path: string;
+                                        filename: string;
+                                    }[];
+
+                                    setLatestImageBatch(processedImages);
+                                    setImageOutputView(processedImages.length > 1 ? 'grid' : 0);
+                                    setStreamingPreviewImages(new Map()); // Clear streaming previews
+
+                                    setHistory((prevHistory) => [newHistoryEntry, ...prevHistory]);
+                                }
                             }
                         }
                     }

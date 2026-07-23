@@ -7,6 +7,11 @@ type SafeApiErrorBody = {
     code?: ApiKeyErrorCode | 'API_KEYS_EXHAUSTED';
 };
 
+type PrimedStream<T> = {
+    first: IteratorResult<T>;
+    iterator: AsyncIterator<T>;
+};
+
 export class ApiKeyPayloadError extends Error {
     constructor(
         message: string,
@@ -110,6 +115,30 @@ export async function withApiKeyFallback<T>(
     }
 
     throw new ApiKeysExhaustedError(finalStatus);
+}
+
+export async function openStreamWithApiKeyFallback<T>(
+    apiKeys: readonly string[],
+    openStream: (apiKey: string, index: number) => Promise<AsyncIterable<T>>
+): Promise<AsyncIterable<T>> {
+    const primed = await withApiKeyFallback<PrimedStream<T>>(apiKeys, async (apiKey, index) => {
+        const stream = await openStream(apiKey, index);
+        const iterator = stream[Symbol.asyncIterator]();
+        const first = await iterator.next();
+        return { first, iterator };
+    });
+
+    return {
+        async *[Symbol.asyncIterator]() {
+            if (!primed.first.done) yield primed.first.value;
+
+            let next = await primed.iterator.next();
+            while (!next.done) {
+                yield next.value;
+                next = await primed.iterator.next();
+            }
+        }
+    };
 }
 
 export function getSafeApiError(
